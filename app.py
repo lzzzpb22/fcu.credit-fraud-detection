@@ -25,25 +25,21 @@ st.markdown("""
 """)
 
 # ==========================================
-# 0. 自動載入與建立樣本資料
+# 0. 自動組合你上傳的分割資料集 (方法一)
 # ==========================================
 @st.cache_resource
 def get_data():
-    csv_path = 'creditcard.csv'
-    if not os.path.exists(csv_path):
-        url = "https://raw.githubusercontent.com/nsethi/Credit-Card-Fraud-Detection/master/creditcard.csv"
-        try:
-            df = pd.read_csv(url)
-        except:
-            np.random.seed(42)
-            n_samples = 20000
-            data = {f'V{i}': np.random.randn(n_samples) for i in range(1, 29)}
-            data['Time'] = np.sort(np.random.randint(0, 172800, n_samples))
-            data['Amount'] = np.random.exponential(50, n_samples)
-            data['Class'] = np.random.choice([0, 1], size=n_samples, p=[0.9983, 0.0017])
-            df = pd.DataFrame(data)
+    # 檢查是否有上傳 part1 與 part2
+    if os.path.exists('creditcard_part1.csv') and os.path.exists('creditcard_part2.csv'):
+        df1 = pd.read_csv('creditcard_part1.csv')
+        df2 = pd.read_csv('creditcard_part2.csv')
+        df = pd.concat([df1, df2], ignore_index=True)
+    elif os.path.exists('creditcard.csv'):
+        df = pd.read_csv('creditcard.csv')
     else:
-        df = pd.read_csv(csv_path)
+        # 備用：若找不到則抓取公開範例確保不崩潰
+        url = "https://raw.githubusercontent.com/nsethi/Credit-Card-Fraud-Detection/master/creditcard.csv"
+        df = pd.read_csv(url)
     return df
 
 # ==========================================
