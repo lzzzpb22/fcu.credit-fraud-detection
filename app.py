@@ -216,7 +216,12 @@ with tab2:
     st.write("- **建議處置**: `即時攔截 (Decline)`")
     
     explainer = shap.TreeExplainer(xgb_model)
-    sample_shap = explainer.shap_values(X_test_scaled[fraud_idx])
+   sample_shap = explainer.shap_values(X_test_scaled[fraud_idx].reshape(1, -1))
+if isinstance(sample_shap, list):
+    sample_shap = sample_shap[1]
+# 如果 shap_values 回傳的維度是 2D，把它轉成 1D 方便後面排序
+if len(sample_shap.shape) > 1:
+    sample_shap = sample_shap[0]
     if isinstance(sample_shap, list):
         sample_shap = sample_shap[1]
     top_feat_idx = np.argsort(np.abs(sample_shap))[::-1][:3]
