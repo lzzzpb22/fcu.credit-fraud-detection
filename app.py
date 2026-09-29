@@ -11,8 +11,6 @@ from sklearn.metrics import precision_recall_curve, roc_auc_score, auc, confusio
 from xgboost import XGBClassifier
 from imblearn.over_sampling import SMOTE
 import os
-import urllib.request
-import zipfile
 
 # 設定網頁版面
 st.set_page_config(
@@ -27,26 +25,21 @@ st.markdown("""
 """)
 
 # ==========================================
-# 0. 自動下載與裁切資料集（解決 GitHub 檔案大小限制）
+# 0. 自動載入與建立樣本資料
 # ==========================================
 @st.cache_resource
 def get_data():
     csv_path = 'creditcard.csv'
     if not os.path.exists(csv_path):
-        # 如果雲端沒有這檔案，透過公開來源或縮減版產生
-        # 為了雲端流暢，我們這裡建立一個精簡且結構完整的樣本資料供展示與模型訓練
-        # 實際專題評報時，此處對應 Kaggle creditcard.csv 資料集
         url = "https://raw.githubusercontent.com/nsethi/Credit-Card-Fraud-Detection/master/creditcard.csv"
         try:
             df = pd.read_csv(url)
         except:
-            # 備用方案：若遠端連線受限，自動生成符合格式的樣本
             np.random.seed(42)
             n_samples = 20000
             data = {f'V{i}': np.random.randn(n_samples) for i in range(1, 29)}
             data['Time'] = np.sort(np.random.randint(0, 172800, n_samples))
             data['Amount'] = np.random.exponential(50, n_samples)
-            # 放入約 0.17% 的詐欺樣本
             data['Class'] = np.random.choice([0, 1], size=n_samples, p=[0.9983, 0.0017])
             df = pd.DataFrame(data)
     else:
@@ -61,7 +54,6 @@ def load_and_evaluate_models():
     df = get_data()
     df = df.sort_values('Time').reset_index(drop=True)
     
-    # 時序切分 (70% 訓練, 15% 驗證, 15% 測試)
     train_end = int(len(df) * 0.70)
     val_end = int(len(df) * 0.85)
     
@@ -171,7 +163,8 @@ st.markdown("---")
 st.subheader("🔬 共同測試集多模型效能比較 (Model Comparison)")
 def get_metrics(y_true, probs, thresh=0.5):
     preds = (probs >= thresh).astype(int)
-    tn, fp, fn, tp = confusion_matrix(y_true, preds).ravel() if confusion_matrix(y_true, preds).size == 4 else (len(y_true)-sum(y_true), 0, sum(y_true), 0)
+    cm_sub = confusion_matrix(y_true, preds)
+    tn, fp, fn, tp = cm_sub.ravel() if cm_sub.size == 4 else (len(y_true)-sum(y_true), 0, sum(y_true), 0)
     prec = precision_score(y_true, preds, zero_division=0)
     rec = recall_score(y_true, preds, zero_division=0)
     f1 = f1_score(y_true, preds, zero_division=0)
@@ -216,14 +209,12 @@ with tab2:
     st.write("- **建議處置**: `即時攔截 (Decline)`")
     
     explainer = shap.TreeExplainer(xgb_model)
-   sample_shap = explainer.shap_values(X_test_scaled[fraud_idx].reshape(1, -1))
-if isinstance(sample_shap, list):
-    sample_shap = sample_shap[1]
-# 如果 shap_values 回傳的維度是 2D，把它轉成 1D 方便後面排序
-if len(sample_shap.shape) > 1:
-    sample_shap = sample_shap[0]
+    sample_shap = explainer.shap_values(X_test_scaled[fraud_idx].reshape(1, -1))
     if isinstance(sample_shap, list):
         sample_shap = sample_shap[1]
+    if len(sample_shap.shape) > 1:
+        sample_shap = sample_shap[0]
+        
     top_feat_idx = np.argsort(np.abs(sample_shap))[::-1][:3]
     
     st.markdown("##### 🔬 可解釋性 AI (SHAP) 判斷主因拆解：")
