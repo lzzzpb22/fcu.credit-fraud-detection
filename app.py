@@ -21,15 +21,14 @@ st.set_page_config(
 
 st.title("🛡️ 金融詐欺即時風險預警與戰情決策原型")
 st.markdown("""
-本系統定位為 **近即時風控原型（Near Real-time Risk Control Prototype）**。依循嚴謹的時序資料切分，結合多模型效能比較、成本效益分析（5:1 / 10:1 / 20:1）、動態風險評分機制與可解釋性 AI (SHAP)，支援金融機構之即時風控決策。
+本系統定位為 **近即時風控原型（Near Real-time Risk Control Prototype）**。依循嚴謹的資料切分，結合多模型效能比較、成本效益分析（5:1 / 10:1 / 20:1）、動態風險評分機制與可解釋性 AI (SHAP)，支援金融機構之即時風控決策。
 """)
 
 # ==========================================
-# 0. 自動組合你上傳的分割資料集 (方法一)
+# 0. 自動組合分割資料集並進行隨機洗牌 (確保含詐欺樣本)
 # ==========================================
 @st.cache_resource
 def get_data():
-    # 檢查是否有上傳 part1 與 part2
     if os.path.exists('creditcard_part1.csv') and os.path.exists('creditcard_part2.csv'):
         df1 = pd.read_csv('creditcard_part1.csv')
         df2 = pd.read_csv('creditcard_part2.csv')
@@ -37,9 +36,11 @@ def get_data():
     elif os.path.exists('creditcard.csv'):
         df = pd.read_csv('creditcard.csv')
     else:
-        # 備用：若找不到則抓取公開範例確保不崩潰
         url = "https://raw.githubusercontent.com/nsethi/Credit-Card-Fraud-Detection/master/creditcard.csv"
         df = pd.read_csv(url)
+    
+    # 隨機洗牌並確保含詐欺樣本
+    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
     return df
 
 # ==========================================
@@ -48,7 +49,6 @@ def get_data():
 @st.cache_resource
 def load_and_evaluate_models():
     df = get_data()
-    df = df.sort_values('Time').reset_index(drop=True)
     
     train_end = int(len(df) * 0.70)
     val_end = int(len(df) * 0.85)
@@ -67,8 +67,12 @@ def load_and_evaluate_models():
     X_val_scaled = scaler.transform(X_val)
     X_test_scaled = scaler.transform(X_test)
     
-    smote = SMOTE(random_state=42)
-    X_train_smote, y_train_smote = smote.fit_resample(X_train_scaled, y_train)
+    # 防呆：確保訓練集同時有 0 與 1 才能用 SMOTE
+    if len(np.unique(y_train)) > 1:
+        smote = SMOTE(random_state=42)
+        X_train_smote, y_train_smote = smote.fit_resample(X_train_scaled, y_train)
+    else:
+        X_train_smote, y_train_smote = X_train_scaled, y_train
     
     # Logistic Regression
     lr = LogisticRegression(random_state=42, max_iter=1000)
@@ -83,7 +87,8 @@ def load_and_evaluate_models():
     iso_probs = (iso_scores_raw - iso_scores_raw.min()) / (iso_scores_raw.max() - iso_scores_raw.min() + 1e-8)
     
     # XGBoost
-    scale_pos_weight_val = (len(y_train) - sum(y_train)) / (sum(y_train) + 1e-5)
+    pos_count = sum(y_train)
+    scale_pos_weight_val = (len(y_train) - pos_count) / (pos_count if pos_count > 0 else 1)
     xgb = XGBClassifier(
         n_estimators=50, max_depth=4, learning_rate=0.1, 
         scale_pos_weight=scale_pos_weight_val, random_state=42
@@ -93,7 +98,7 @@ def load_and_evaluate_models():
     
     return xgb, lr, iso, scaler, X_test_scaled, y_test, features, test_df, xgb_probs, lr_probs, iso_probs
 
-with st.spinner("正在進行時序資料切分、多模型訓練與測試集評估中..."):
+with st.spinner("正在進行資料洗牌、多模型訓練與測試集評估中..."):
     xgb_model, lr_model, iso_model, scaler, X_test_scaled, y_test, features, test_df, xgb_probs, lr_probs, iso_probs = load_and_evaluate_models()
 
 # ==========================================
@@ -164,7 +169,7 @@ def get_metrics(y_true, probs, thresh=0.5):
     prec = precision_score(y_true, preds, zero_division=0)
     rec = recall_score(y_true, preds, zero_division=0)
     f1 = f1_score(y_true, preds, zero_division=0)
-    auc_roc = roc_auc_score(y_true, probs)
+    auc_roc = roc_auc_score(y_true, probs) if len(np.unique(y_true)) > 1 else 0.5
     precision_vals, recall_vals, _ = precision_recall_curve(y_true, probs)
     auc_pr = auc(recall_vals, precision_vals)
     false_10k = (fp / len(y_true)) * 10000
