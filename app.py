@@ -8,6 +8,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import IsolationForest
 from sklearn.metrics import precision_recall_curve, roc_auc_score, auc, confusion_matrix, f1_score, precision_score, recall_score
+from sklearn.model_selection import train_test_split
 from xgboost import XGBClassifier
 from imblearn.over_sampling import SMOTE
 import os
@@ -20,7 +21,7 @@ st.set_page_config(
 )
 
 # ==========================================
-# 0. 資料載入、清洗與模型訓練快取
+# 0. 資料載入與清洗快取
 # ==========================================
 @st.cache_resource
 def get_data():
@@ -34,7 +35,6 @@ def get_data():
         url = "https://raw.githubusercontent.com/nsethi/Credit-Card-Fraud-Detection/master/creditcard.csv"
         df = pd.read_csv(url)
     
-    # 關鍵修正：自動清除資料中的 NaN 與無限大值 (inf)
     df = df.replace([np.inf, -np.inf], np.nan).dropna()
     df = df.sample(frac=1, random_state=42).reset_index(drop=True)
     return df
@@ -43,24 +43,24 @@ def get_data():
 def load_and_evaluate_models():
     df = get_data()
     
-    train_end = int(len(df) * 0.70)
-    val_end = int(len(df) * 0.85)
-    
-    train_df = df.iloc[:train_end]
-    val_df = df.iloc[train_end:val_end]
-    test_df = df.iloc[val_end:]
-    
     features = [col for col in df.columns if col not in ['Time', 'Class']]
-    X_train, y_train = train_df[features], train_df['Class']
-    X_val, y_val = val_df[features], val_df['Class']
-    X_test, y_test = test_df[features], test_df['Class']
+    X = df[features]
+    y = df['Class']
+    
+    # 關鍵修正：使用分層抽樣 (Stratified Split)，確保訓練、驗證、測試集都一定含有詐欺樣本 (Class 1)
+    X_train_val, X_test, y_train_val, y_test = train_test_split(
+        X, y, test_size=0.15, random_state=42, stratify=y
+    )
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_val, y_train_val, test_size=0.1765, random_state=42, stratify=y_train_val
+    )
     
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
     X_val_scaled = scaler.transform(X_val)
     X_test_scaled = scaler.transform(X_test)
     
-    # 萬無一失的防呆：利用 try-except 確保 SMOTE 失敗時自動降級使用原始訓練集
+    # SMOTE 過取樣防呆保護
     try:
         pos_count = int(sum(y_train == 1))
         if len(np.unique(y_train)) > 1 and pos_count >= 2:
@@ -72,19 +72,19 @@ def load_and_evaluate_models():
     except Exception:
         X_train_smote, y_train_smote = X_train_scaled, y_train
     
-    # Logistic Regression
+    # 1. Logistic Regression
     lr = LogisticRegression(random_state=42, max_iter=1000)
     lr.fit(X_train_smote, y_train_smote)
     lr_probs = lr.predict_proba(X_test_scaled)[:, 1]
     
-    # Isolation Forest
+    # 2. Isolation Forest
     normal_train = X_train_scaled[y_train == 0]
     iso = IsolationForest(contamination=0.0017, random_state=42)
     iso.fit(normal_train)
     iso_scores_raw = -iso.decision_function(X_test_scaled)
     iso_probs = (iso_scores_raw - iso_scores_raw.min()) / (iso_scores_raw.max() - iso_scores_raw.min() + 1e-8)
     
-    # XGBoost
+    # 3. XGBoost
     pos_count_train = int(sum(y_train == 1))
     scale_pos_weight_val = (len(y_train) - pos_count_train) / (pos_count_train if pos_count_train > 0 else 1)
     xgb = XGBClassifier(
@@ -94,9 +94,13 @@ def load_and_evaluate_models():
     xgb.fit(X_train_smote, y_train_smote)
     xgb_probs = xgb.predict_proba(X_test_scaled)[:, 1]
     
+    test_df = X_test.copy()
+    test_df['Class'] = y_test.values
+    test_df['Time'] = 0 # 佔位用
+    
     return xgb, lr, iso, scaler, X_test_scaled, y_test, features, test_df, xgb_probs, lr_probs, iso_probs
 
-with st.spinner("正在進行量化資料清洗、切分與多模型平行運算中..."):
+with st.spinner("正在進行分層抽樣、資料清洗與多模型平行運算中..."):
     xgb_model, lr_model, iso_model, scaler, X_test_scaled, y_test, features, test_df, xgb_probs, lr_probs, iso_probs = load_and_evaluate_models()
 
 # ==========================================
