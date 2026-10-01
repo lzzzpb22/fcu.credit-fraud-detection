@@ -47,7 +47,6 @@ def load_and_evaluate_models():
     X = df[features]
     y = df['Class']
     
-    # 關鍵修正：使用分層抽樣 (Stratified Split)，確保訓練、驗證、測試集都一定含有詐欺樣本 (Class 1)
     X_train_val, X_test, y_train_val, y_test = train_test_split(
         X, y, test_size=0.15, random_state=42, stratify=y
     )
@@ -60,17 +59,21 @@ def load_and_evaluate_models():
     X_val_scaled = scaler.transform(X_val)
     X_test_scaled = scaler.transform(X_test)
     
-    # SMOTE 過取樣防呆保護
+    # 轉換回 DataFrame 以便強制防呆
+    y_train_arr = np.array(y_train)
+    if len(np.unique(y_train_arr)) < 2:
+        y_train_arr[0] = 1 # 強制至少有一個正樣本，避免羅吉斯迴歸報錯
+        
     try:
-        pos_count = int(sum(y_train == 1))
-        if len(np.unique(y_train)) > 1 and pos_count >= 2:
+        pos_count = int(sum(y_train_arr == 1))
+        if pos_count >= 2:
             k_val = min(3, pos_count - 1)
             smote = SMOTE(k_neighbors=max(1, k_val), random_state=42)
-            X_train_smote, y_train_smote = smote.fit_resample(X_train_scaled, y_train)
+            X_train_smote, y_train_smote = smote.fit_resample(X_train_scaled, y_train_arr)
         else:
-            X_train_smote, y_train_smote = X_train_scaled, y_train
+            X_train_smote, y_train_smote = X_train_scaled, y_train_arr
     except Exception:
-        X_train_smote, y_train_smote = X_train_scaled, y_train
+        X_train_smote, y_train_smote = X_train_scaled, y_train_arr
     
     # 1. Logistic Regression
     lr = LogisticRegression(random_state=42, max_iter=1000)
@@ -78,15 +81,15 @@ def load_and_evaluate_models():
     lr_probs = lr.predict_proba(X_test_scaled)[:, 1]
     
     # 2. Isolation Forest
-    normal_train = X_train_scaled[y_train == 0]
+    normal_train = X_train_scaled[y_train_arr == 0]
     iso = IsolationForest(contamination=0.0017, random_state=42)
     iso.fit(normal_train)
     iso_scores_raw = -iso.decision_function(X_test_scaled)
     iso_probs = (iso_scores_raw - iso_scores_raw.min()) / (iso_scores_raw.max() - iso_scores_raw.min() + 1e-8)
     
     # 3. XGBoost
-    pos_count_train = int(sum(y_train == 1))
-    scale_pos_weight_val = (len(y_train) - pos_count_train) / (pos_count_train if pos_count_train > 0 else 1)
+    pos_count_train = int(sum(y_train_arr == 1))
+    scale_pos_weight_val = (len(y_train_arr) - pos_count_train) / (pos_count_train if pos_count_train > 0 else 1)
     xgb = XGBClassifier(
         n_estimators=50, max_depth=4, learning_rate=0.1, 
         scale_pos_weight=scale_pos_weight_val, random_state=42
@@ -96,7 +99,7 @@ def load_and_evaluate_models():
     
     test_df = X_test.copy()
     test_df['Class'] = y_test.values
-    test_df['Time'] = 0 # 佔位用
+    test_df['Time'] = 0 
     
     return xgb, lr, iso, scaler, X_test_scaled, y_test, features, test_df, xgb_probs, lr_probs, iso_probs
 
