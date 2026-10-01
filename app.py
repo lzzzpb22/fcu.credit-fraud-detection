@@ -20,7 +20,7 @@ st.set_page_config(
 )
 
 # ==========================================
-# 0. 資料載入與模型訓練快取
+# 0. 資料載入、清洗與模型訓練快取
 # ==========================================
 @st.cache_resource
 def get_data():
@@ -34,6 +34,8 @@ def get_data():
         url = "https://raw.githubusercontent.com/nsethi/Credit-Card-Fraud-Detection/master/creditcard.csv"
         df = pd.read_csv(url)
     
+    # 關鍵修正：自動清除資料中的 NaN 與無限大值 (inf)
+    df = df.replace([np.inf, -np.inf], np.nan).dropna()
     df = df.sample(frac=1, random_state=42).reset_index(drop=True)
     return df
 
@@ -94,7 +96,7 @@ def load_and_evaluate_models():
     
     return xgb, lr, iso, scaler, X_test_scaled, y_test, features, test_df, xgb_probs, lr_probs, iso_probs
 
-with st.spinner("正在進行量化資料切分與多模型平行運算中..."):
+with st.spinner("正在進行量化資料清洗、切分與多模型平行運算中..."):
     xgb_model, lr_model, iso_model, scaler, X_test_scaled, y_test, features, test_df, xgb_probs, lr_probs, iso_probs = load_and_evaluate_models()
 
 # ==========================================
