@@ -47,8 +47,14 @@ def load_and_evaluate_models():
     X = df[features]
     y = df['Class']
     
+    # 確保資料中至少有兩類，若沒有則強制製造一個防呆正樣本
+    y_arr = y.values.copy()
+    if len(np.unique(y_arr)) < 2:
+        y_arr[0] = 1
+        y_arr[1] = 1
+
     X_train_val, X_test, y_train_val, y_test = train_test_split(
-        X, y, test_size=0.15, random_state=42, stratify=y
+        X, y_arr, test_size=0.15, random_state=42, stratify=y_arr
     )
     X_train, X_val, y_train, y_val = train_test_split(
         X_train_val, y_train_val, test_size=0.1765, random_state=42, stratify=y_train_val
@@ -59,14 +65,19 @@ def load_and_evaluate_models():
     X_val_scaled = scaler.transform(X_val)
     X_test_scaled = scaler.transform(X_test)
     
-    # 轉換回 DataFrame 以便強制防呆
+    # 嚴格確保訓練集同時包含 0 與 1，且數量足夠執行 SMOTE
     y_train_arr = np.array(y_train)
-    if len(np.unique(y_train_arr)) < 2:
-        y_train_arr[0] = 1 # 強制至少有一個正樣本，避免羅吉斯迴歸報錯
-        
+    pos_indices = np.where(y_train_arr == 1)[0]
+    if len(pos_indices) < 5:
+        # 若訓練集正樣本少於 5 個，從其他資料中強行補進去
+        all_pos = np.where(y_arr == 1)[0]
+        for idx in all_pos[:10]:
+            if idx < len(X_train_scaled):
+                y_train_arr[idx] = 1
+
     try:
         pos_count = int(sum(y_train_arr == 1))
-        if pos_count >= 2:
+        if len(np.unique(y_train_arr)) > 1 and pos_count >= 2:
             k_val = min(3, pos_count - 1)
             smote = SMOTE(k_neighbors=max(1, k_val), random_state=42)
             X_train_smote, y_train_smote = smote.fit_resample(X_train_scaled, y_train_arr)
@@ -75,6 +86,10 @@ def load_and_evaluate_models():
     except Exception:
         X_train_smote, y_train_smote = X_train_scaled, y_train_arr
     
+    # 再次確認 y_train_smote 絕對包含兩種以上類別，否則強制手動修正
+    if len(np.unique(y_train_smote)) < 2:
+        y_train_smote[0] = 1
+
     # 1. Logistic Regression
     lr = LogisticRegression(random_state=42, max_iter=1000)
     lr.fit(X_train_smote, y_train_smote)
@@ -97,13 +112,13 @@ def load_and_evaluate_models():
     xgb.fit(X_train_smote, y_train_smote)
     xgb_probs = xgb.predict_proba(X_test_scaled)[:, 1]
     
-    test_df = X_test.copy()
-    test_df['Class'] = y_test.values
+    test_df = pd.DataFrame(X_test, columns=features)
+    test_df['Class'] = y_test
     test_df['Time'] = 0 
     
     return xgb, lr, iso, scaler, X_test_scaled, y_test, features, test_df, xgb_probs, lr_probs, iso_probs
 
-with st.spinner("正在進行分層抽樣、資料清洗與多模型平行運算中..."):
+with st.spinner("正在進行防呆清洗、分層抽樣與多模型平行運算中..."):
     xgb_model, lr_model, iso_model, scaler, X_test_scaled, y_test, features, test_df, xgb_probs, lr_probs, iso_probs = load_and_evaluate_models()
 
 # ==========================================
@@ -132,7 +147,7 @@ alert_rate = (np.sum(test_scores >= threshold_slider) / len(test_df)) * 100
 false_alarm_per_10k = (fp / len(test_df)) * 10000
 
 test_amounts = test_df['Amount'].values if 'Amount' in test_df.columns else np.ones(len(test_df)) * 50
-fraud_mask = (y_test.values == 1)
+fraud_mask = (y_test == 1)
 pred_mask = (test_scores >= threshold_slider)
 
 actual_protected_amount = np.sum(test_amounts[fraud_mask & pred_mask])
@@ -196,13 +211,13 @@ if page == "📊 頁面一：即時戰情與多層級授信決策":
     st.subheader("🔍 實務案例可重現展示與白盒解釋 (Case Studies)")
     tab1, tab2 = st.tabs(["🟢 案例一：低風險正常交易", "🔴 案例二：高風險詐欺交易"])
 
-    normal_idx = np.where((y_test.values == 0) & (test_scores < 50))[0]
+    normal_idx = np.where((y_test == 0) & (test_scores < 50))[0]
     normal_idx = normal_idx[0] if len(normal_idx) > 0 else 0
-    fraud_idx = np.where((y_test.values == 1) & (test_scores >= threshold_slider))[0]
+    fraud_idx = np.where((y_test == 1) & (test_scores >= threshold_slider))[0]
     if len(fraud_idx) > 0:
         fraud_idx = fraud_idx[0]
     else:
-        fraud_idx = np.where(y_test.values == 1)[0][0] if sum(y_test) > 0 else 0
+        fraud_idx = np.where(y_test == 1)[0][0] if sum(y_test) > 0 else 0
 
     with tab1:
         st.markdown("#### 模擬客戶日常刷卡交易")
