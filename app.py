@@ -58,13 +58,16 @@ def load_and_evaluate_models():
     X_val_scaled = scaler.transform(X_val)
     X_test_scaled = scaler.transform(X_test)
     
-    # 嚴謹防呆：確保同時有兩類且少數類別 >= 6 筆才執行 SMOTE，否則使用原始訓練集
-    pos_count = sum(y_train == 1)
-    if len(np.unique(y_train)) > 1 and pos_count >= 6:
-        k_val = min(5, pos_count - 1)
-        smote = SMOTE(k_neighbors=k_val, random_state=42)
-        X_train_smote, y_train_smote = smote.fit_resample(X_train_scaled, y_train)
-    else:
+    # 萬無一失的防呆：利用 try-except 確保 SMOTE 失敗時自動降級使用原始訓練集
+    try:
+        pos_count = int(sum(y_train == 1))
+        if len(np.unique(y_train)) > 1 and pos_count >= 2:
+            k_val = min(3, pos_count - 1)
+            smote = SMOTE(k_neighbors=max(1, k_val), random_state=42)
+            X_train_smote, y_train_smote = smote.fit_resample(X_train_scaled, y_train)
+        else:
+            X_train_smote, y_train_smote = X_train_scaled, y_train
+    except Exception:
         X_train_smote, y_train_smote = X_train_scaled, y_train
     
     # Logistic Regression
@@ -80,7 +83,8 @@ def load_and_evaluate_models():
     iso_probs = (iso_scores_raw - iso_scores_raw.min()) / (iso_scores_raw.max() - iso_scores_raw.min() + 1e-8)
     
     # XGBoost
-    scale_pos_weight_val = (len(y_train) - pos_count) / (pos_count if pos_count > 0 else 1)
+    pos_count_train = int(sum(y_train == 1))
+    scale_pos_weight_val = (len(y_train) - pos_count_train) / (pos_count_train if pos_count_train > 0 else 1)
     xgb = XGBClassifier(
         n_estimators=50, max_depth=4, learning_rate=0.1, 
         scale_pos_weight=scale_pos_weight_val, random_state=42
