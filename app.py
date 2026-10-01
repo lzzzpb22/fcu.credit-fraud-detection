@@ -19,10 +19,6 @@ def load_and_evaluate_models():
     """
     載入或初始化資料與模型，並進行訓練與評估
     """
-    # 這裡假設你的專案中含有資料或預先訓練好的模型
-    # 為了示範完整結構，此處以模擬載入與訓練流程為主
-    
-    # 模擬產生特徵與測試集資料 (實際專案中請替換為你的讀取檔案邏輯)
     np.random.seed(42)
     n_samples = 1000
     n_features = 10
@@ -47,15 +43,12 @@ def load_and_evaluate_models():
     X_train_smote, y_train_smote = smote.fit_resample(X_train_scaled, y_train)
 
     # 定義並訓練模型
-    # 1. Logistic Regression (此處加上 .ravel() 確保標籤為一維陣列，解決 ValueError)
     lr_model = LogisticRegression(random_state=42)
     lr_model.fit(X_train_smote, y_train_smote.ravel())
     
-    # 2. XGBoost / RandomForest (此處以 RandomForest 模擬樹狀模型)
     xgb_model = RandomForestClassifier(random_state=42)
     xgb_model.fit(X_train_smote, y_train_smote.ravel())
 
-    # 3. Isolation Forest (非監督式異常偵測)
     from sklearn.ensemble import IsolationForest
     iso_model = IsolationForest(contamination=0.05, random_state=42)
     iso_model.fit(X_train_scaled)
@@ -64,9 +57,8 @@ def load_and_evaluate_models():
     lr_probs = lr_model.predict_proba(X_test_scaled)[:, 1]
     xgb_probs = xgb_model.predict_proba(X_test_scaled)[:, 1]
     
-    # Isolation Forest 轉換分數
     iso_scores = iso_model.decision_function(X_test_scaled)
-    iso_probs = 1 / (1 + np.exp(iso_scores))  # 將分數轉化為類似機率
+    iso_probs = 1 / (1 + np.exp(iso_scores))
 
     return (
         xgb_model, lr_model, iso_model, scaler, 
@@ -78,7 +70,7 @@ def main():
     st.title("🛡️ 信用卡詐欺偵測即時風險儀表板")
     st.markdown("本系統透過多種機器學習模型（如 Logistic Regression, XGBoost/Random Forest, Isolation Forest）進行即時交易風險評估。")
 
-    # 載入模型與資料 (對應錯誤發生的第 122 行)
+    # 載入模型與資料
     try:
         (
             xgb_model, lr_model, iso_model, scaler, 
@@ -101,7 +93,6 @@ def main():
     # 主畫面顯示
     st.subheader("📊 測試集風險預測總覽")
     
-    # 根據選擇顯示對應機率
     if model_choice == "Logistic Regression":
         selected_probs = lr_probs
     elif model_choice == "Random Forest / XGBoost":
@@ -122,7 +113,14 @@ def main():
     results_df['Risk_Score'] = selected_probs
     results_df['Is_Fraud_Alert'] = results_df['Risk_Score'] >= threshold
     
-    st.dataframe(results_df.style.highlight_greaterthan(subset=['Risk_Score'], threshold=threshold, color='#ffcccc'))
+    # 修正：使用自訂函數與 .apply() 取代原本的 highlight_greaterthan
+    def highlight_risk(val):
+        color = '#ffcccc' if val >= threshold else ''
+        return f'background-color: {color}'
+
+    st.dataframe(
+        results_df.style.applymap(highlight_risk, subset=['Risk_Score'])
+    )
 
 if __name__ == "__main__":
     main()
