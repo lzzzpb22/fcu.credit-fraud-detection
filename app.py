@@ -58,8 +58,11 @@ def load_and_evaluate_models():
     X_val_scaled = scaler.transform(X_val)
     X_test_scaled = scaler.transform(X_test)
     
-    if len(np.unique(y_train)) > 1:
-        smote = SMOTE(random_state=42)
+    # 嚴謹防呆：確保同時有兩類且少數類別 >= 6 筆才執行 SMOTE，否則使用原始訓練集
+    pos_count = sum(y_train == 1)
+    if len(np.unique(y_train)) > 1 and pos_count >= 6:
+        k_val = min(5, pos_count - 1)
+        smote = SMOTE(k_neighbors=k_val, random_state=42)
         X_train_smote, y_train_smote = smote.fit_resample(X_train_scaled, y_train)
     else:
         X_train_smote, y_train_smote = X_train_scaled, y_train
@@ -77,7 +80,6 @@ def load_and_evaluate_models():
     iso_probs = (iso_scores_raw - iso_scores_raw.min()) / (iso_scores_raw.max() - iso_scores_raw.min() + 1e-8)
     
     # XGBoost
-    pos_count = sum(y_train)
     scale_pos_weight_val = (len(y_train) - pos_count) / (pos_count if pos_count > 0 else 1)
     xgb = XGBClassifier(
         n_estimators=50, max_depth=4, learning_rate=0.1, 
@@ -116,12 +118,10 @@ tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (len(y_test)-sum(y_test), 0, su
 alert_rate = (np.sum(test_scores >= threshold_slider) / len(test_df)) * 100
 false_alarm_per_10k = (fp / len(test_df)) * 10000
 
-# 金額加權財務曝險計算 (結合 Amount 欄位)
 test_amounts = test_df['Amount'].values if 'Amount' in test_df.columns else np.ones(len(test_df)) * 50
 fraud_mask = (y_test.values == 1)
 pred_mask = (test_scores >= threshold_slider)
 
-# 實際攔截到的詐欺金額加權總額
 actual_protected_amount = np.sum(test_amounts[fraud_mask & pred_mask])
 total_fraud_exposure = np.sum(test_amounts[fraud_mask])
 
@@ -134,7 +134,6 @@ if page == "📊 頁面一：即時戰情與多層級授信決策":
     本系統定位為 **近即時風控決策原型（Near Real-time Risk Control Prototype）**。結合機器學習模型評估、多層級授信分流引擎與可解釋性 AI (SHAP)，支援金融機構動態風控。
     """)
     
-    # KPI 總覽
     st.subheader("📊 營運戰情 KPI 總覽")
     col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("測試集總交易數", f"{len(test_df):,}")
@@ -145,10 +144,7 @@ if page == "📊 頁面一：即時戰情與多層級授信決策":
 
     st.markdown("---")
 
-    # 殺手級功能三：多層級授信與風控處置矩陣 (Action Policy Matrix)
     st.subheader("🎯 金融科技多層級授信分流矩陣 (Action Policy Matrix)")
-    
-    # 計算各區間筆數
     auto_approve_count = np.sum(test_scores < 50)
     otp_count = np.sum((test_scores >= 50) & (test_scores < threshold_slider))
     decline_count = np.sum(test_scores >= threshold_slider)
@@ -160,7 +156,6 @@ if page == "📊 頁面一：即時戰情與多層級授信決策":
 
     st.markdown("---")
 
-    # 共同測試集多模型比較
     st.subheader("🔬 共同測試集多模型效能比較 (Model Comparison)")
     def get_metrics(y_true, probs, thresh=0.5):
         preds = (probs >= thresh).astype(int)
@@ -185,7 +180,6 @@ if page == "📊 頁面一：即時戰情與多層級授信決策":
 
     st.markdown("---")
 
-    # SHAP 可解釋性案例
     st.subheader("🔍 實務案例可重現展示與白盒解釋 (Case Studies)")
     tab1, tab2 = st.tabs(["🟢 案例一：低風險正常交易", "🔴 案例二：高風險詐欺交易"])
 
@@ -223,13 +217,10 @@ if page == "📊 頁面一：即時戰情與多層級授信決策":
 elif page == "📈 頁面二：財金量化分析與成本效益曲線":
     st.title("📈 財金量化分析與成本效益最佳化模型")
     st.markdown("""
-    本頁面從**量化金融與經濟學視角**出發，深入探討 5:1、10:1、20:1 三種成本情境下的最佳決策門檻，並透過成本曲線證明 85% 門檻之合理性[cite: 4, 13]。
+    本頁面從**量化金融與經濟學視角**出發，深入探討 5:1、10:1、20:1 三種成本情境下的最佳決策門檻，並透過成本曲線證明 85% 門檻之合理性。
     """)
     
-    # 殺手級功能二：動態成本效益最佳化曲線視覺化
     st.subheader("📉 成本效益最佳化曲線 (Cost-Benefit Optimization Curve)")
-    st.markdown("藉由模擬不同風險門檻（50% 至 95%）對應的總營運成本（漏報成本 + 誤報人工審核成本），尋找總成本最低的數學平衡點。")
-    
     thresholds_range = np.linspace(50, 95, 46)
     costs_5_1, costs_10_1, costs_20_1 = [], [], []
     
@@ -238,7 +229,6 @@ elif page == "📈 頁面二：財金量化分析與成本效益曲線":
         cm_th = confusion_matrix(y_test, preds_th)
         _, fp_th, fn_th, _ = cm_th.ravel() if cm_th.size == 4 else (0, 0, 0, 0)
         
-        # 成本計算公式：Cost = (FN * 成本權重) + (FP * 1)
         costs_5_1.append(fn_th * 5 + fp_th * 1)
         costs_10_1.append(fn_th * 10 + fp_th * 1)
         costs_20_1.append(fn_th * 20 + fp_th * 1)
@@ -260,12 +250,11 @@ elif page == "📈 頁面二：財金量化分析與成本效益曲線":
     💡 **量化分析結論**：
     - 當門檻過低（如 50%），會導致大量誤報（FP），推高人工審核成本。
     - 當門檻過高（如 95%），會導致漏報（FN），造成巨大金流損失。
-    - 在 **10:1 成本情境**下，總成本曲線在 **85% 左右達到全域最低點**，完美支持本系統預設 85% 門檻之決策正當性[cite: 4, 13]。
+    - 在 **10:1 成本情境**下，總成本曲線在 **85% 左右達到全域最低點**，完美支持本系統預設 85% 門檻之決策正當性。
     """)
 
     st.markdown("---")
 
-    # 殺手級功能一：金額加權財務曝險分析 (Financial Exposure Analysis)
     st.subheader("💰 財務曝險與金流保護效益分析")
     col_f1, col_f2, col_f3 = st.columns(3)
     col_f1.metric("測試集總金流曝險", f"${total_fraud_exposure:,.0f}", "若完全無防護之真實詐欺總金額")
