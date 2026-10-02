@@ -1,313 +1,171 @@
-import time
+import io
+import os
+import zipfile
+from collections import Counter
 import numpy as np
 import pandas as pd
-import streamlit as st
 import shap
-import matplotlib.pyplot as plt
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import IsolationForest
-from sklearn.metrics import precision_recall_curve, roc_auc_score, auc, confusion_matrix, f1_score, precision_score, recall_score
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    auc,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_recall_curve,
+    roc_auc_score,
+)
 from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
+
+print("1. 載入並檢查資料...")
+
+# 自動偵測多種資料來源（支援 Colab zip、本機 CSV 或切分檔）
+df = None
+if os.path.exists('/content/sample_data/creditcard_fixed.zip'):
+  with zipfile.ZipFile('/content/sample_data/creditcard_fixed.zip', 'r') as z:
+    with z.open(z.namelist()[0]) as f:
+      df = pd.read_csv(f)
+elif os.path.exists('creditcard_part1.csv') and os.path.exists(
+    'creditcard_part2.csv'
+):
+  df1 = pd.read_csv('creditcard_part1.csv')
+  df2 = pd.read_csv('creditcard_part2.csv')
+  df = pd.concat([df1, df2], ignore_index=True)
+elif os.path.exists('creditcard.csv'):
+  df = pd.read_csv('creditcard.csv')
+else:
+  raise FileNotFoundError(
+      '找不到資料集檔案！請確認 creditcard_fixed.zip 或 CSV 檔案是否存在當前路徑。'
+  )
+
+# 清理空值並確保 Class 為整數型態
+df = df.dropna(subset=['Class'])
+df['Class'] = df['Class'].astype(int)
+
+# 依時間排序 (Time 欄位)
+if 'Time' in df.columns:
+  df = df.sort_values('Time').reset_index(drop=True)
+
+X = df.drop(columns=['Class', 'Time'] if 'Time' in df.columns else ['Class'])
+y = df['Class']
+
+total_fraud = int(y.sum())
+print(
+    f"資料總筆數: {len(df)}, 原始詐欺總數: {total_fraud} ({y.mean()*100:.4f}%)"
+)
+
+# 關鍵防呆檢查
+if total_fraud == 0:
+  raise ValueError(
+      "【嚴重錯誤】載入的資料集裡 Class=1 (詐欺) 筆數為 0！請檢查讀取到的 CSV"
+      " 是否為空或資料被過濾掉了。"
+  )
+
+# ==========================================
+# 2. 時間序列/分層切分：嚴格保留未抽樣的測試集
+# ==========================================
+# 嚴格遵循指引：stratify=y 保持各集合正例比例，且測試集絕不抽樣
+X_temp, X_test, y_temp, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+X_train, X_val, y_train, y_val = train_test_split(
+    X_temp, y_temp, test_size=0.25, random_state=42, stratify=y_temp
+)
+
+print(
+    f"訓練集大小: {len(X_train)} (詐欺: {y_train.sum()} 筆), 驗證集大小:"
+    f" {len(X_val)}, 測試集大小: {len(X_test)} (詐欺: {y_test.sum()} 筆)"
+)
+
+# ==========================================
+# 3. 特徵標準化與僅在訓練集套用 SMOTE
+# ==========================================
 from imblearn.over_sampling import SMOTE
-import os
 
-# 設定網頁版面
-st.set_page_config(
-    page_title="金融詐欺即時風險預警與量化決策系統",
-    page_icon="🛡️",
-    layout="wide"
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_val_scaled = scaler.transform(X_val)
+X_test_scaled = scaler.transform(X_test)
+
+# 動態設定 k_neighbors 避免正例數量過少造成報錯
+pos_train = int(y_train.sum())
+k_neighbors = min(5, pos_train - 1) if pos_train > 1 else 1
+
+smote = SMOTE(k_neighbors=k_neighbors, random_state=42)
+X_train_res, y_train_res = smote.fit_resample(X_train_scaled, y_train)
+print(f"SMOTE 平衡後訓練集分佈: {Counter(y_train_res)}")
+
+# ==========================================
+# 4. 模型訓練 (Logistic Regression, XGBoost, Isolation Forest)
+# ==========================================
+# A. Logistic Regression (基準模型)
+lr_model = LogisticRegression(max_iter=1000, random_state=42)
+lr_model.fit(X_train_res, y_train_res)
+lr_probs = lr_model.predict_proba(X_test_scaled)[:, 1]
+
+# B. XGBoost (加入 scale_pos_weight 處理不平衡)
+neg_count = (y_train == 0).sum()
+pos_count = (y_train == 1).sum()
+scale_weight = neg_count / max(1, pos_count)
+
+xgb_model = XGBClassifier(
+    n_estimators=100,
+    max_depth=5,
+    learning_rate=0.1,
+    scale_pos_weight=scale_weight,
+    random_state=42,
+    eval_metric='logloss',
+)
+xgb_model.fit(X_train_scaled, y_train)
+xgb_probs = xgb_model.predict_proba(X_test_scaled)[:, 1]
+
+# C. Isolation Forest (無監督異常偵測，僅用正常樣本訓練)
+X_train_normal = X_train_scaled[y_train == 0]
+iso_model = IsolationForest(
+    n_estimators=100, contamination=0.002, random_state=42
+)
+iso_model.fit(X_train_normal)
+iso_scores_raw = iso_model.decision_function(X_test_scaled)
+iso_probs = 1 / (1 + np.exp(iso_scores_raw))
+
+print("模型訓練與推論完成！")
+
+# ==========================================
+# 5. 驗證集門檻選擇與成本分析
+# ==========================================
+val_probs = xgb_model.predict_proba(X_val_scaled)[:, 1]
+precisions, recalls, thresholds = precision_recall_curve(y_val, val_probs)
+f1_scores = 2 * (precisions * recalls) / (precisions + recalls + 1e-10)
+best_threshold = thresholds[np.argmax(f1_scores)]
+print(f"驗證集選出的最佳決策門檻 (Threshold): {best_threshold:.4f}")
+
+
+def calculate_cost(y_true, y_pred, cost_fn=10, cost_fp=1):
+  cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+  tn, fp, fn, tp = cm.ravel()
+  total_cost = (fn * cost_fn) + (fp * cost_fp)
+  return total_cost, tn, fp, fn, tp
+
+
+# 在測試集套用最佳門檻進行最終評估
+y_test_pred = (xgb_probs >= best_threshold).astype(int)
+print("\n=== XGBoost 測試集最終評估報告 ===")
+print(classification_report(y_test, y_test_pred, labels=[0, 1]))
+
+cost_val, tn, fp, fn, tp = calculate_cost(
+    y_test, y_test_pred, cost_fn=10, cost_fp=1
+)
+print(
+    f"成本分析 (FN成本=10, FP成本=1) -> 總成本: {cost_val} (TN={tn}, FP={fp},"
+    f" FN={fn}, TP={tp})"
 )
 
 # ==========================================
-# 0. 資料載入與清洗快取
+# 6. SHAP 可解釋性分析
 # ==========================================
-@st.cache_resource
-def get_data():
-    if os.path.exists('creditcard_part1.csv') and os.path.exists('creditcard_part2.csv'):
-        df1 = pd.read_csv('creditcard_part1.csv')
-        df2 = pd.read_csv('creditcard_part2.csv')
-        df = pd.concat([df1, df2], ignore_index=True)
-    elif os.path.exists('creditcard.csv'):
-        df = pd.read_csv('creditcard.csv')
-    else:
-        # 完整備用模擬資料（確保內含充足的正負樣本供展示）
-        np.random.seed(42)
-        n_samples = 30000
-        data = {f'V{i}': np.random.randn(n_samples) for i in range(1, 29)}
-        data['Time'] = np.sort(np.random.randint(0, 172800, n_samples))
-        data['Amount'] = np.random.exponential(50, n_samples)
-        data['Class'] = np.random.choice([0, 1], size=n_samples, p=[0.995, 0.005])
-        df = pd.DataFrame(data)
-    
-    df = df.replace([np.inf, -np.inf], np.nan).dropna()
-    df = df.sample(frac=1, random_state=42).reset_index(drop=True)
-    return df
-
-@st.cache_resource
-def load_and_evaluate_models():
-    df = get_data()
-    
-    features = [col for col in df.columns if col not in ['Time', 'Class']]
-    X = df[features]
-    y = df['Class'].copy()
-    
-    # 確保全域資料至少有兩類
-    if len(np.unique(y)) < 2:
-        y.iloc[0] = 1
-        y.iloc[1] = 0
-
-    X_train_val, X_test, y_train_val, y_test = train_test_split(
-        X, y, test_size=0.15, random_state=42, stratify=y
-    )
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_train_val, y_train_val, test_size=0.1765, random_state=42, stratify=y_train_val
-    )
-    
-    # 絕對防呆：將 y_train 轉為 numpy array 並強制確保至少包含 2 個正樣本 (Class 1) 與 2 個負樣本 (Class 0)
-    y_train_arr = np.array(y_train)
-    if sum(y_train_arr == 1) < 2:
-        pos_idx = np.where(y == 1)[0]
-        if len(pos_idx) > 0:
-            # 從原始資料借調正樣本塞進訓練集的第一與第二個位置
-            X_train.iloc[0] = X.iloc[pos_idx[0]]
-            X_train.iloc[1] = X.iloc[pos_idx[min(1, len(pos_idx)-1)]]
-            y_train_arr[0] = 1
-            y_train_arr[1] = 1
-        else:
-            y_train_arr[0] = 1
-            y_train_arr[1] = 1
-            
-    if sum(y_train_arr == 0) < 2:
-        y_train_arr[2] = 0
-        y_train_arr[3] = 0
-
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_val_scaled = scaler.transform(X_val)
-    X_test_scaled = scaler.transform(X_test)
-    
-    # 執行 SMOTE 過取樣
-    try:
-        pos_count = int(sum(y_train_arr == 1))
-        k_val = min(3, pos_count - 1)
-        smote = SMOTE(k_neighbors=max(1, k_val), random_state=42)
-        X_train_smote, y_train_smote = smote.fit_resample(X_train_scaled, y_train_arr)
-    except Exception:
-        X_train_smote, y_train_smote = X_train_scaled, y_train_arr
-    
-    # 最終保險：確保 y_train_smote 絕對包含兩種以上類別
-    if len(np.unique(y_train_smote)) < 2:
-        y_train_smote[0] = 1
-        y_train_smote[1] = 0
-
-    # 1. Logistic Regression
-    lr = LogisticRegression(random_state=42, max_iter=1000)
-    lr.fit(X_train_smote, y_train_smote)
-    lr_probs = lr.predict_proba(X_test_scaled)[:, 1]
-    
-    # 2. Isolation Forest
-    normal_train = X_train_scaled[y_train_arr == 0]
-    iso = IsolationForest(contamination=0.0017, random_state=42)
-    iso.fit(normal_train)
-    iso_scores_raw = -iso.decision_function(X_test_scaled)
-    iso_probs = (iso_scores_raw - iso_scores_raw.min()) / (iso_scores_raw.max() - iso_scores_raw.min() + 1e-8)
-    
-    # 3. XGBoost
-    pos_count_train = int(sum(y_train_arr == 1))
-    scale_pos_weight_val = (len(y_train_arr) - pos_count_train) / (pos_count_train if pos_count_train > 0 else 1)
-    xgb = XGBClassifier(
-        n_estimators=50, max_depth=4, learning_rate=0.1, 
-        scale_pos_weight=scale_pos_weight_val, random_state=42
-    )
-    xgb.fit(X_train_smote, y_train_smote)
-    xgb_probs = xgb.predict_proba(X_test_scaled)[:, 1]
-    
-    test_df = pd.DataFrame(X_test, columns=features)
-    test_df['Class'] = y_test.values
-    test_df['Time'] = 0 
-    
-    return xgb, lr, iso, scaler, X_test_scaled, y_test, features, test_df, xgb_probs, lr_probs, iso_probs
-
-with st.spinner("正在進行強固防呆清洗、分層抽樣與多模型平行運算中..."):
-    xgb_model, lr_model, iso_model, scaler, X_test_scaled, y_test, features, test_df, xgb_probs, lr_probs, iso_probs = load_and_evaluate_models()
-
-# ==========================================
-# 1. 側邊欄導覽與全域參數
-# ==========================================
-st.sidebar.markdown("# 🛡️ FinTech 風控中樞")
-page = st.sidebar.radio("選擇展示頁面", ["📊 頁面一：即時戰情與多層級授信決策", "📈 頁面二：財金量化分析與成本效益曲線"])
-
-st.sidebar.markdown("---")
-st.sidebar.header("⚙️ 決策引擎參數調整")
-threshold_slider = st.sidebar.slider(
-    "高風險攔截門檻 (風險分數 %)",
-    min_value=50.0,
-    max_value=95.0,
-    value=85.0,
-    step=1.0,
-    help="依據 5:1、10:1、20:1 成本情境驗證之最佳營運平衡點。"
-)
-
-test_scores = xgb_probs * 100
-y_pred_dynamic = (test_scores >= threshold_slider).astype(int)
-cm = confusion_matrix(y_test, y_pred_dynamic)
-tn, fp, fn, tp = cm.ravel() if cm.size == 4 else (len(y_test)-sum(y_test), 0, sum(y_test), 0)
-
-alert_rate = (np.sum(test_scores >= threshold_slider) / len(test_df)) * 100
-false_alarm_per_10k = (fp / len(test_df)) * 10000
-
-test_amounts = test_df['Amount'].values if 'Amount' in test_df.columns else np.ones(len(test_df)) * 50
-fraud_mask = (y_test.values == 1)
-pred_mask = (test_scores >= threshold_slider)
-
-actual_protected_amount = np.sum(test_amounts[fraud_mask & pred_mask])
-total_fraud_exposure = np.sum(test_amounts[fraud_mask])
-
-# ==========================================
-# 📊 頁面一：即時戰情與多層級授信決策
-# ==========================================
-if page == "📊 頁面一：即時戰情與多層級授信決策":
-    st.title("🛡️ 金融詐欺即時風險預警與多層級決策原型")
-    st.markdown("""
-    本系統定位為 **近即時風控決策原型（Near Real-time Risk Control Prototype）**。結合機器學習模型評估、多層級授信分流引擎與可解釋性 AI (SHAP)，支援金融機構動態風控。
-    """)
-    
-    st.subheader("📊 營運戰情 KPI 總覽")
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("測試集總交易數", f"{len(test_df):,}")
-    col2.metric("真實詐欺總數", f"{sum(y_test):,}")
-    col3.metric("系統警報率 (Alert Rate)", f"{alert_rate:.2f}%", help="依門檻挑出的待處理交易佔比")
-    col4.metric("每萬筆誤報數", f"{false_alarm_per_10k:.1f} 筆")
-    col5.metric("已保護金流總額", f"${actual_protected_amount:,.0f}", help="成功攔截之實際交易金額加權統計")
-
-    st.markdown("---")
-
-    st.subheader("🎯 金融科技多層級授信分流矩陣 (Action Policy Matrix)")
-    auto_approve_count = np.sum(test_scores < 50)
-    otp_count = np.sum((test_scores >= 50) & (test_scores < threshold_slider))
-    decline_count = np.sum(test_scores >= threshold_slider)
-    
-    col_p1, col_p2, col_p3 = st.columns(3)
-    col_p1.metric("🟢 0 - 49 分：自動放行", f"{auto_approve_count:,} 筆", "維持流暢支付體驗 (Auto-Approve)")
-    col_p2.metric("🟡 50 ~ 門檻分：二次驗證", f"{otp_count:,} 筆", "發送 OTP / 3D 驗證 (Friction Reduced)")
-    col_p3.metric("🔴 門檻分 ~ 100 分：即時攔截", f"{decline_count:,} 筆", "強制拒絕並通報風控中心 (Decline)")
-
-    st.markdown("---")
-
-    st.subheader("🔬 共同測試集多模型效能比較 (Model Comparison)")
-    def get_metrics(y_true, probs, thresh=0.5):
-        preds = (probs >= thresh).astype(int)
-        cm_sub = confusion_matrix(y_true, preds)
-        tn, fp, fn, tp = cm_sub.ravel() if cm_sub.size == 4 else (len(y_true)-sum(y_true), 0, sum(y_true), 0)
-        prec = precision_score(y_true, preds, zero_division=0)
-        rec = recall_score(y_true, preds, zero_division=0)
-        f1 = f1_score(y_true, preds, zero_division=0)
-        auc_roc = roc_auc_score(y_true, probs) if len(np.unique(y_true)) > 1 else 0.5
-        precision_vals, recall_vals, _ = precision_recall_curve(y_true, probs)
-        auc_pr = auc(recall_vals, precision_vals)
-        false_10k = (fp / len(y_true)) * 10000
-        return [auc_roc, auc_pr, prec, rec, f1, tp, fp, fn, false_10k]
-
-    comparison_data = {
-        "評估指標": ["ROC-AUC", "PR-AUC", "Precision", "Recall", "F1-Score", "TP (命中)", "FP (誤報)", "FN (漏報)", "每萬筆誤報數"],
-        "Logistic Regression": get_metrics(y_test, lr_probs),
-        "Isolation Forest (無監督)": get_metrics(y_test, iso_probs),
-        "XGBoost (核心模型)": get_metrics(y_test, xgb_probs)
-    }
-    st.dataframe(pd.DataFrame(comparison_data), use_container_width=True)
-
-    st.markdown("---")
-
-    st.subheader("🔍 實務案例可重現展示與白盒解釋 (Case Studies)")
-    tab1, tab2 = st.tabs(["🟢 案例一：低風險正常交易", "🔴 案例二：高風險詐欺交易"])
-
-    normal_idx = np.where((y_test.values == 0) & (test_scores < 50))[0]
-    normal_idx = normal_idx[0] if len(normal_idx) > 0 else 0
-    fraud_idx = np.where((y_test.values == 1) & (test_scores >= threshold_slider))[0]
-    if len(fraud_idx) > 0:
-        fraud_idx = fraud_idx[0]
-    else:
-        fraud_idx = np.where(y_test.values == 1)[0][0] if sum(y_test) > 0 else 0
-
-    with tab1:
-        st.markdown("#### 模擬客戶日常刷卡交易")
-        st.write(f"- **實際標籤**: 正常交易 | **風險評分**: `{test_scores[normal_idx]:.2f} 分` (🟢 自動放行)")
-
-    with tab2:
-        st.markdown("#### 模擬異常盜刷交易")
-        st.write(f"- **實際標籤**: 詐欺交易 | **風險評分**: `{test_scores[fraud_idx]:.2f} 分` (🔴 即時攔截)")
-        
-        explainer = shap.TreeExplainer(xgb_model)
-        sample_shap = explainer.shap_values(X_test_scaled[fraud_idx].reshape(1, -1))
-        if isinstance(sample_shap, list):
-            sample_shap = sample_shap[1]
-        if len(sample_shap.shape) > 1:
-            sample_shap = sample_shap[0]
-            
-        top_feat_idx = np.argsort(np.abs(sample_shap))[::-1][:3]
-        st.markdown("##### 🔬 SHAP 關鍵特徵貢獻拆解：")
-        for i in top_feat_idx:
-            st.write(f"- **{features[i]}**: 標準化數值 = `{X_test_scaled[fraud_idx, i]:.2f}`, SHAP 貢獻值 = `{sample_shap[i]:.2f}`")
-
-# ==========================================
-# 📈 頁面二：財金量化分析與成本效益曲線
-# ==========================================
-elif page == "📈 頁面二：財金量化分析與成本效益曲線":
-    st.title("📈 財金量化分析與成本效益最佳化模型")
-    st.markdown("""
-    本頁面從**量化金融與經濟學視角**出發，深入探討 5:1、10:1、20:1 三種成本情境下的最佳決策門檻，並透過成本曲線證明 85% 門檻之合理性。
-    """)
-    
-    st.subheader("📉 成本效益最佳化曲線 (Cost-Benefit Optimization Curve)")
-    thresholds_range = np.linspace(50, 95, 46)
-    costs_5_1, costs_10_1, costs_20_1 = [], [], []
-    
-    for th in thresholds_range:
-        preds_th = (test_scores >= th).astype(int)
-        cm_th = confusion_matrix(y_test, preds_th)
-        _, fp_th, fn_th, _ = cm_th.ravel() if cm_th.size == 4 else (0, 0, 0, 0)
-        
-        costs_5_1.append(fn_th * 5 + fp_th * 1)
-        costs_10_1.append(fn_th * 10 + fp_th * 1)
-        costs_20_1.append(fn_th * 20 + fp_th * 1)
-        
-    fig, ax = plt.subplots(figsize=(10, 4.5))
-    ax.plot(thresholds_range, costs_5_1, label="FN:FP = 5 : 1 (重誤報)", color="blue", lw=2)
-    ax.plot(thresholds_range, costs_10_1, label="FN:FP = 10 : 1 (平衡推薦)", color="green", lw=2.5, linestyle="--")
-    ax.plot(thresholds_range, costs_20_1, label="FN:FP = 20 : 1 (重漏報)", color="red", lw=2)
-    ax.axvline(x=threshold_slider, color="orange", linestyle=":", label=f"當前選定門檻 ({threshold_slider}%)")
-    
-    ax.set_title("不同成本比重下之總營運成本曲線", fontsize=14, fontweight='bold')
-    ax.set_xlabel("高風險攔截門檻 (%)", fontsize=12)
-    ax.set_ylabel("總營運損耗成本 (單位)", fontsize=12)
-    ax.legend(loc="upper right")
-    ax.grid(True, linestyle="alpha=0.3")
-    st.pyplot(fig)
-    
-    st.info("""
-    💡 **量化分析結論**：
-    - 當門檻過低（如 50%），會導致大量誤報（FP），推高人工審核成本。
-    - 當門檻過高（如 95%），會導致漏報（FN），造成巨大金流損失。
-    - 在 **10:1 成本情境**下，總成本曲線在 **85% 左右達到全域最低點**，完美支持本系統預設 85% 門檻之決策正當性。
-    """)
-
-    st.markdown("---")
-
-    st.subheader("💰 財務曝險與金流保護效益分析")
-    col_f1, col_f2, col_f3 = st.columns(3)
-    col_f1.metric("測試集總金流曝險", f"${total_fraud_exposure:,.0f}", "若完全無防護之真實詐欺總金額")
-    col_f2.metric("當前門檻成功保護金流", f"${actual_protected_amount:,.0f}", f"攔截率 {(actual_protected_amount/total_fraud_exposure)*100:.1f}%")
-    col_f3.metric("未攔截漏報潛在損失", f"${total_fraud_exposure - actual_protected_amount:,.0f}", "需透過保險或二次驗證覆蓋")
-
-    st.markdown("---")
-    st.subheader("⚡ 系統單筆推論延遲測試")
-    if st.button("執行 1,000 次即時推論延遲基準測試"):
-        latencies = []
-        sample_input = X_test_scaled[0].reshape(1, -1)
-        for _ in range(1000):
-            start = time.perf_counter()
-            _ = xgb_model.predict_proba(sample_input)
-            latencies.append((time.perf_counter() - start) * 1000)
-        st.success(f"效能達標！p50: {np.percentile(latencies, 50):.4f} ms | p95: {np.percentile(latencies, 95):.4f} ms (符合 FinTech 毫秒級交易審查需求)")
+print("\n計算 XGBoost 的 SHAP 解釋...")
+explainer = shap.TreeExplainer(xgb_model)
+shap_values = explainer(X_test)
+print("SHAP 解釋計算完成！全部流程執行完畢。")
