@@ -66,7 +66,6 @@ if total_fraud == 0:
 # ==========================================
 # 2. 時間序列/分層切分：嚴格保留未抽樣的測試集
 # ==========================================
-# 嚴格遵循指引：stratify=y 保持各集合正例比例，且測試集絕不抽樣
 X_temp, X_test, y_temp, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y
 )
@@ -167,5 +166,6 @@ print(
 # ==========================================
 print("\n計算 XGBoost 的 SHAP 解釋...")
 explainer = shap.TreeExplainer(xgb_model)
-shap_values = explainer(X_test)
+# 修正處：改傳入 X_test_scaled (NumPy 陣列)，避免 Pandas DataFrame 轉換報錯
+shap_values = explainer(X_test_scaled)
 print("SHAP 解釋計算完成！全部流程執行完畢。")
